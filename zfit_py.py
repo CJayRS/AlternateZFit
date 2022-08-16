@@ -1,3 +1,5 @@
+from pickle import MEMOIZE
+from re import X
 import h5py as h5
 from math import sqrt,pi
 import numpy as np
@@ -11,8 +13,19 @@ import time
 import masses
 from tqdm import tqdm
 from numba import jit
+import cProfile
+#from multiprocessing import Pool, TimeoutError, Process, Manager
+from pathos.multiprocessing import ProcessingPool as Pool
+from pathos.multiprocessing import freeze_support
+import warnings
+import snakeviz
+import pstats
+
+warnings.filterwarnings("ignore", message="delta_grad == 0.0. Check if the approximated function is linear.")
 
 #commit check example
+if __name__ == '__main__':
+    freeze_support()
 
 # light mesons
 mpi=(2*0.13957061+0.1349770)/3 # PDG2018
@@ -87,6 +100,11 @@ f2_norm = (2*alpha*(1+f2_b**2+f2_c**2) + (1+f2_c)*f2_b*4*sin_alpha + f2_c*2*sin_
 
 
 def alt_polynomial(t,n):
+    '''
+    t: number - q^2 value to evaluate the functions at
+    n: n^th polynomial to be evaluated
+    returns: function evaluation (float)
+    '''
     if n == 0:
         return f0_norm*1
     if n == 1:
@@ -249,7 +267,7 @@ def ffs_from_input_q2(zerotlist,plustlist,nsamples = 0):
 #ffs_from_input_q2([15,20],[15,17,20])
 
 
-def function_to_minimise(inputs,inputq2,inputffs,invcov,functtype = "zfit"):#, lam
+def function_to_minimise(inputs,inputq2,nzero,nplus,inputffs,invcov,functtype = "zfit"):#, lam
     #make sure to define:inputq2,inputffs,inputcov,functtype = "zfit" before this
     coefficients = (inputs[0:nzero],inputs[nzero:nzero+nplus])
     ssum = 0
@@ -261,7 +279,11 @@ def function_to_minimise(inputs,inputq2,inputffs,invcov,functtype = "zfit"):#, l
     return ssum# + lam*(zfunction(0,coefficients[0],0)-zfunction(0,coefficients[1],1))**2
 
 
-
+def worker_job(args):
+    (resampledffdata_element, inputq2, invcov, functtype, constype,initial_guess,nzero,nplus)= args#,nprocess
+    # if nprocess%10 == 0:
+    #     print(nprocess)
+    return scipy.optimize.minimize(function_to_minimise,initial_guess,args = (inputq2,nzero,nplus,resampledffdata_element,invcov,functtype),method='trust-constr',constraints=constype,tol = 1e-04).x
 
 def zfitit(inputq2,nboot,functtype = "zfit"):
     ffdata = ffs_from_input_q2(inputq2[0],inputq2[1])
@@ -270,233 +292,251 @@ def zfitit(inputq2,nboot,functtype = "zfit"):
     nplus = len(inputq2[1])
     resampledffs = (resampledffdata[:,0:nzero],resampledffdata[:,nzero:])#,dtype = object
     invcov = np.linalg.inv(ffdata[2])
-    initial_guess = scipy.optimize.minimize(function_to_minimise,np.linspace(0.1,0.1,nzero+nplus),args = (inputq2,np.append(ffdata[0][1],ffdata[1][1]),invcov),method='trust-constr',constraints=cons).x
-    outputcoeffs = np.zeros((nzero+nplus,nboot))
+    initial_guess_forjack = scipy.optimize.minimize(function_to_minimise,np.linspace(0.1,0.1,nzero+nplus),args = (inputq2,nzero,nplus,np.append(ffdata[0][1],ffdata[1][1]),invcov),method='trust-constr',constraints=cons,tol = 1e-04)
+    initial_guess = initial_guess_forjack.x
     if functtype == "zfit":
         constype = cons
     elif functtype == "altfit":
         constype = cons_alt
-    for i in tqdm(range(np.shape(resampledffdata)[0])):
-        #print(i)
-        outputcoeffs[:,i] = scipy.optimize.minimize(function_to_minimise,initial_guess,args = (inputq2,resampledffdata[i,:],invcov,functtype),method='trust-constr',constraints=constype).x
+    # for i in tqdm(range(np.shape(resampledffdata)[0])):
+    #     #print(i)
+    #     outputcoeffs[:,i] = scipy.optimize.minimize(function_to_minimise,initial_guess,args = (inputq2,resampledffdata[i,:],invcov,functtype),method='trust-constr',constraints=constype).x
+    #curried_job = worker_job(inputq2, invcov, functtype, constype)
+    inputs = [(resampledffdata[i,:], inputq2, invcov, functtype, constype,initial_guess,nzero,nplus) for i in range(np.shape(resampledffdata)[0])]
+    with Pool(processes=None) as pool:
+        outputcoeffs = []
+        for coeff in tqdm(pool.imap(worker_job,inputs),total = np.shape(resampledffdata)[0]):#map
+            outputcoeffs.append(coeff)
     return outputcoeffs
 
-
-
-
-inputq2 = np.array(([15,17,20],[15,20]),dtype=object)
-nzero = 3 #len(inputq2[0])#+1
-nplus = 2 #len(inputq2[1])#+1
-genffdata = ffs_from_input_q2(inputq2[0],inputq2[1])
-inputffs = np.append(genffdata[0][1],genffdata[1][1]) #temporary (havent been resampled yet)
-print(inputffs)
-inputcov = genffdata[2]
-#lam = 10**3
-invcov = np.linalg.inv(inputcov)
-#cons = [{'type': 'ineq', 'fun': lambda inlist: zfunction(0,inlist[:nzero],0)-zfunction(0,inlist[nzero:nzero+nplus],1)},
-#        {'type': 'ineq', 'fun': lambda inlist: -zfunction(0,inlist[:nzero],0)+zfunction(0,inlist[nzero:nzero+nplus],1)}]
-cons = [{'type': 'eq', 'fun': lambda inlist: zfunction(0,inlist[:nzero],0)-zfunction(0,inlist[nzero:nzero+nplus],1)},{'type': 'ineq', 'fun': lambda inlist: 1- sum([inlist[i]**2 for i in range(len(inlist))])}]
-scipy.optimize.minimize(function_to_minimise,np.linspace(0.1,0.1,nzero+nplus),args = (inputq2,inputffs,inputcov,"altfit"), method='trust-constr',constraints=cons).x #,bounds = [(-1,1),(-1,1),(-1,1),(-1,1),(-1,1)], ,functtype = "zfit"
-
-
-
-
-q2rangetoplot = np.linspace(0,23,24)
-coefficients = np.array([-0.16989614, -0.12108523,  0.04556504, -0.04126728, -0.05150325])
-ffstoplot = ffs_from_input_q2(inputq2[0],inputq2[1])
-inputffs = np.append(ffstoplot[0][1],ffstoplot[1][1])
-print(inputq2)
-print(ffstoplot)
-plt.scatter(ffstoplot[0][0],ffstoplot[0][1],color = "blue")
-plt.scatter(ffstoplot[1][0],ffstoplot[1][1],color = "orange")
-plt.plot(q2rangetoplot, [zfunction(q2,coefficients[:nzero],0,"altfit") for q2 in q2rangetoplot],color = "blue")
-plt.plot(q2rangetoplot, [zfunction(q2,coefficients[nzero:nzero+nplus],1,"altfit") for q2 in q2rangetoplot],color = "orange")
-print(zfunction(0,coefficients[nzero:nzero+nplus],1,"altfit")-zfunction(0,coefficients[:nzero],0,"altfit"))
-print(coefficients[:nzero],coefficients[nzero:nzero+nplus])
+if __name__ == '__main__':
+    inputq2 = np.array(([15,17,20],[15,20]),dtype=object)
+    nzero = 3 #len(inputq2[0])#+1
+    nplus = 2 #len(inputq2[1])#+1
+    genffdata = ffs_from_input_q2(inputq2[0],inputq2[1])
+    inputffs = np.append(genffdata[0][1],genffdata[1][1]) #temporary (havent been resampled yet)
+    print(inputffs)
+    inputcov = genffdata[2]
+    #lam = 10**3
+    invcov = np.linalg.inv(inputcov)
+    #cons = [{'type': 'ineq', 'fun': lambda inlist: zfunction(0,inlist[:nzero],0)-zfunction(0,inlist[nzero:nzero+nplus],1)},
+    #        {'type': 'ineq', 'fun': lambda inlist: -zfunction(0,inlist[:nzero],0)+zfunction(0,inlist[nzero:nzero+nplus],1)}]
+    cons = [{'type': 'eq', 'fun': lambda inlist: zfunction(0,inlist[:nzero],0)-zfunction(0,inlist[nzero:nzero+nplus],1)},{'type': 'ineq', 'fun': lambda inlist: 1- sum([inlist[i]**2 for i in range(len(inlist))])}]
+    #scipy.optimize.minimize(function_to_minimise,np.linspace(0.1,0.1,nzero+nplus),args = (inputq2,inputffs,inputcov,"altfit"), method='trust-constr',constraints=cons).x #,bounds = [(-1,1),(-1,1),(-1,1),(-1,1),(-1,1)], ,functtype = "zfit"
 
 
 
 
-inputq2 = np.array(([17,18,20],[17,20]),dtype=object)
-
-
-nzero = 3 #len(inputq2[0])#+1
-nplus = 2 #len(inputq2[1])#+1
-genffdata = ffs_from_input_q2(inputq2[0],inputq2[1])
-inputffs = np.append(genffdata[0][1],genffdata[1][1]) #temporary (havent been resampled yet)
-print(inputffs)
-inputcov = genffdata[2]
-#lam = 10**3
-invcov = np.linalg.inv(inputcov)
-#cons = [{'type': 'ineq', 'fun': lambda inlist: zfunction(0,inlist[:nzero],0)-zfunction(0,inlist[nzero:nzero+nplus],1)},
-#        {'type': 'ineq', 'fun': lambda inlist: -zfunction(0,inlist[:nzero],0)+zfunction(0,inlist[nzero:nzero+nplus],1)}]
-cons = [{'type': 'eq', 'fun': lambda inlist: zfunction(0,inlist[:nzero],0)-zfunction(0,inlist[nzero:nzero+nplus],1)},{'type': 'ineq', 'fun': lambda inlist: 1- sum([inlist[i]**2 for i in range(len(inlist))])}]
-cons_alt = [{'type': 'eq', 'fun': lambda inlist: zfunction(0,inlist[:nzero],0,"altfit")-zfunction(0,inlist[nzero:nzero+nplus],1,"altfit")},{'type': 'ineq', 'fun': lambda inlist: 1- sum([inlist[i]**2 for i in range(len(inlist))])}]
-
-scipy.optimize.minimize(function_to_minimise,np.linspace(0.1,0.1,nzero+nplus),args = (inputq2,inputffs,inputcov),method='trust-constr',constraints=cons).x#,bounds = [(-1,1),(-1,1),(-1,1),(-1,1),(-1,1)], ,functtype = "zfit"
+    q2rangetoplot = np.linspace(0,23,24)
+    coefficients = np.array([-0.16989614, -0.12108523,  0.04556504, -0.04126728, -0.05150325])
+    ffstoplot = ffs_from_input_q2(inputq2[0],inputq2[1])
+    inputffs = np.append(ffstoplot[0][1],ffstoplot[1][1])
+    print(inputq2)
+    print(ffstoplot)
+    plt.scatter(ffstoplot[0][0],ffstoplot[0][1],color = "blue")
+    plt.scatter(ffstoplot[1][0],ffstoplot[1][1],color = "orange")
+    plt.plot(q2rangetoplot, [zfunction(q2,coefficients[:nzero],0,"altfit") for q2 in q2rangetoplot],color = "blue")
+    plt.plot(q2rangetoplot, [zfunction(q2,coefficients[nzero:nzero+nplus],1,"altfit") for q2 in q2rangetoplot],color = "orange")
+    print(zfunction(0,coefficients[nzero:nzero+nplus],1,"altfit")-zfunction(0,coefficients[:nzero],0,"altfit"))
+    print(coefficients[:nzero],coefficients[nzero:nzero+nplus])
 
 
 
 
-q2rangetoplot = np.linspace(0,23,24)
-coefficients = np.array([ 0.0745317 , -0.3148924 ,  0.1163006 ,  0.01836438, -0.07009019])
-ffstoplot = ffs_from_input_q2(inputq2[0],inputq2[1])
-inputffs = np.append(ffstoplot[0][1],ffstoplot[1][1])
-print(inputq2)
-print(ffstoplot)
-plt.scatter(ffstoplot[0][0],ffstoplot[0][1],color = "blue")
-plt.scatter(ffstoplot[1][0],ffstoplot[1][1],color = "orange")
-plt.plot(q2rangetoplot, [zfunction(q2,coefficients[:nzero],0) for q2 in q2rangetoplot],color = "blue")
-plt.plot(q2rangetoplot, [zfunction(q2,coefficients[nzero:nzero+nplus],1) for q2 in q2rangetoplot],color = "orange")
-print(zfunction(0,coefficients[nzero:nzero+nplus],1)-zfunction(0,coefficients[:nzero],0))
-print(coefficients[:nzero],coefficients[nzero:nzero+nplus])
+    inputq2 = np.array(([17,18,20],[17,20]),dtype=object)
+
+
+    nzero = 3 #len(inputq2[0])#+1
+    nplus = 2 #len(inputq2[1])#+1
+    genffdata = ffs_from_input_q2(inputq2[0],inputq2[1])
+    inputffs = np.append(genffdata[0][1],genffdata[1][1]) #temporary (havent been resampled yet)
+    #print(inputffs)
+    inputcov = genffdata[2]
+    #lam = 10**3
+    invcov = np.linalg.inv(inputcov)
+    #cons = [{'type': 'ineq', 'fun': lambda inlist: zfunction(0,inlist[:nzero],0)-zfunction(0,inlist[nzero:nzero+nplus],1)},
+    #        {'type': 'ineq', 'fun': lambda inlist: -zfunction(0,inlist[:nzero],0)+zfunction(0,inlist[nzero:nzero+nplus],1)}]
+    cons = [{'type': 'eq', 'fun': lambda inlist: zfunction(0,inlist[:nzero],0)-zfunction(0,inlist[nzero:nzero+nplus],1)},{'type': 'ineq', 'fun': lambda inlist: 1- sum([inlist[i]**2 for i in range(len(inlist))])}]
+    cons_alt = [{'type': 'eq', 'fun': lambda inlist: zfunction(0,inlist[:nzero],0,"altfit")-zfunction(0,inlist[nzero:nzero+nplus],1,"altfit")},{'type': 'ineq', 'fun': lambda inlist: 1- sum([inlist[i]**2 for i in range(len(inlist))])}]
+
+
+    ffdata = ffs_from_input_q2(inputq2[0],inputq2[1])
+    invcov = np.linalg.inv(ffdata[2])
+
+    
+    #.x#,bounds = [(-1,1),(-1,1),(-1,1),(-1,1),(-1,1)], ,functtype = "zfit"
+
+
+    q2rangetoplot = np.linspace(0,23,24)
+    coefficients = np.array([ 0.0745317 , -0.3148924 ,  0.1163006 ,  0.01836438, -0.07009019])
+    ffstoplot = ffs_from_input_q2(inputq2[0],inputq2[1])
+    inputffs = np.append(ffstoplot[0][1],ffstoplot[1][1])
+    #print(inputq2)
+    #print(ffstoplot)
+    # plt.scatter(ffstoplot[0][0],ffstoplot[0][1],color = "blue")
+    # plt.scatter(ffstoplot[1][0],ffstoplot[1][1],color = "orange")
+    # plt.plot(q2rangetoplot, [zfunction(q2,coefficients[:nzero],0) for q2 in q2rangetoplot],color = "blue")
+    # plt.plot(q2rangetoplot, [zfunction(q2,coefficients[nzero:nzero+nplus],1) for q2 in q2rangetoplot],color = "orange")
+    # print(zfunction(0,coefficients[nzero:nzero+nplus],1)-zfunction(0,coefficients[:nzero],0))
+    # print(coefficients[:nzero],coefficients[nzero:nzero+nplus])
 
 
 
 
-ffdata = ffs_from_input_q2(inputq2[0],inputq2[1])
-a = np.random.multivariate_normal(np.append(ffdata[1][1],ffdata[0][1]),ffdata[2],size=10)#[:,1]
+    #ffdata = ffs_from_input_q2(inputq2[0],inputq2[1])
+    #a = np.random.multivariate_normal(np.append(ffdata[1][1],ffdata[0][1]),ffdata[2],size=10)#[:,1]
 
 
 
+
+    #inputq2 = np.array(([17.5,19,23],[17.5,23]),dtype=object)
+    nboot = 2000
+#scipy.optimize.minimize(function_to_minimise,np.linspace(0.1,0.1,nzero+nplus),args = (inputq2,nzero,nplus,np.append(ffdata[0][1],ffdata[1][1]),invcov),method='trust-constr',constraints=cons,tol = 1e-04)
+if __name__ == '__main__':
+    # Initialize profile class and call regression() function
+    profiler = cProfile.Profile()
+    profiler.enable()
+    coarray = np.array(zfitit(inputq2,nboot)).T
+    profiler.disable()
+    profiler.dump_stats('dumpedstats.prof')
+    #exit()
+
+
+nzero = 3
+nplus = 2
 
 #inputq2 = np.array(([17.5,19,23],[17.5,23]),dtype=object)
-nboot = 100
-coarray = zfitit(inputq2,nboot)
+if __name__ == '__main__':
+    coarray_alt = np.array(zfitit(inputq2,nboot,"altfit")).T
 
 
 
-
-#inputq2 = np.array(([17.5,19,23],[17.5,23]),dtype=object)
-coarray_alt = zfitit(inputq2,nboot,"altfit")
-
-
-
-plt.rcParams["figure.figsize"] = (15,15)
-fig,axs = plt.subplots(3,2)
-#fig.suptitle(r'Bounds at $q^2 = 0$ with randomly generated input form factor $q^2$ values')
-axs[0,0].hist(coarray[0,:])
-axs[0,0].set_title("c_0")
-axs[0,1].hist(coarray[1,:])
-axs[0,1].set_title("c_1")
-axs[1,0].hist(coarray[2,:])
-axs[1,0].set_title("c_2")
-axs[1,1].hist(coarray[3,:])
-axs[1,1].set_title("c_3")
-axs[2,1].hist(coarray[4,:])
-axs[2,1].set_title("c_4")
-plt.show()
+# plt.rcParams["figure.figsize"] = (15,15)
+# fig,axs = plt.subplots(3,2)
+# #fig.suptitle(r'Bounds at $q^2 = 0$ with randomly generated input form factor $q^2$ values')
+# axs[0,0].hist(coarray[0,:])
+# axs[0,0].set_title("c_0")
+# axs[0,1].hist(coarray[1,:])
+# axs[0,1].set_title("c_1")
+# axs[1,0].hist(coarray[2,:])
+# axs[1,0].set_title("c_2")
+# axs[1,1].hist(coarray[3,:])
+# axs[1,1].set_title("c_3")
+# axs[2,1].hist(coarray[4,:])
+# axs[2,1].set_title("c_4")
+# plt.show()
 
 
-
-q2rangetoplot = np.linspace(0,23,70)
-ffarray = np.zeros((2,len(q2rangetoplot),np.shape(coarray)[1]))
-for i,q2 in enumerate(q2rangetoplot):
-    for j in range(np.shape(coarray)[1]):
-        ffarray[0,i,j] = zfunction(q2,coarray[:nzero,j],0)
-        ffarray[1,i,j] = zfunction(q2,coarray[nzero:nzero+nplus,j],1)
-sigmabelow = round(np.shape(coarray)[1] * (1-0.6827)/2)
-sigmaabove = round(np.shape(coarray)[1] * (1+0.6827)/2)
-sorted_ffarray = np.sort(ffarray,2)
+if __name__ == '__main__':
+    q2rangetoplot = np.linspace(0,23,70)
+    ffarray = np.zeros((2,len(q2rangetoplot),np.shape(coarray)[1]))
+if __name__ == '__main__':
+    for i,q2 in enumerate(q2rangetoplot):
+        for j in range(np.shape(coarray)[1]):
+            ffarray[0,i,j] = zfunction(q2,coarray[:nzero,j],0)
+            ffarray[1,i,j] = zfunction(q2,coarray[nzero:nzero+nplus,j],1)
+    sigmabelow = round(np.shape(coarray)[1] * (1-0.6827)/2)
+    sigmaabove = round(np.shape(coarray)[1] * (1+0.6827)/2)
+    sorted_ffarray = np.sort(ffarray,2)
 
 
 
-
-q2rangetoplot = np.linspace(0,23,70)
-ffstoplot = ffs_from_input_q2(inputq2[0],inputq2[1])
-inputffs = np.append(ffstoplot[0][1],ffstoplot[1][1])
-plt.scatter(ffstoplot[0][0],ffstoplot[0][1],color = "blue")
-plt.scatter(ffstoplot[1][0],ffstoplot[1][1],color = "orange")
-for i in range(np.shape(coarray)[1]):
-    #plt.plot(q2rangetoplot, [zfunction(q2,coarray[:nzero,i],0) for q2 in q2rangetoplot],color = "blue",alpha=0.005)
-    #plt.plot(q2rangetoplot, [zfunction(q2,coarray[nzero:nzero+nplus,i],1) for q2 in q2rangetoplot],color = "orange",alpha=0.005)
-    plt.plot(q2rangetoplot,[sorted_ffarray[0,q2,sigmabelow] for q2 in range(len(q2rangetoplot))],color = "blue")
-    plt.plot(q2rangetoplot,[sorted_ffarray[0,q2,sigmaabove] for q2 in range(len(q2rangetoplot))],color = "blue")
-    plt.plot(q2rangetoplot,[sorted_ffarray[1,q2,sigmabelow] for q2 in range(len(q2rangetoplot))],color = "orange")
-    plt.plot(q2rangetoplot,[sorted_ffarray[1,q2,sigmaabove] for q2 in range(len(q2rangetoplot))],color = "orange")
-plt.show()
-
-
-
-q2rangetoplot = np.linspace(0,23,70)
-ffarray_alt = np.zeros((2,len(q2rangetoplot),np.shape(coarray_alt)[1]))
-for i,q2 in enumerate(q2rangetoplot):
-    for j in range(np.shape(coarray_alt)[1]):
-        ffarray_alt[0,i,j] = zfunction(q2,coarray_alt[:nzero,j],0,"altfit")
-        ffarray_alt[1,i,j] = zfunction(q2,coarray_alt[nzero:nzero+nplus,j],1,"altfit")
-sigmabelow_alt = round(np.shape(coarray_alt)[1] * (1-0.6827)/2)
-sigmaabove_alt = round(np.shape(coarray_alt)[1] * (1+0.6827)/2)
-sorted_ffarray_alt = np.sort(ffarray_alt,2)
+if __name__ == '__main__':
+    q2rangetoplot = np.linspace(0,23,70)
+    ffstoplot = ffs_from_input_q2(inputq2[0],inputq2[1])
+    inputffs = np.append(ffstoplot[0][1],ffstoplot[1][1])
+    plt.scatter(ffstoplot[0][0],ffstoplot[0][1],color = "blue")
+    plt.scatter(ffstoplot[1][0],ffstoplot[1][1],color = "orange")
+    for i in range(np.shape(coarray)[1]):
+        #plt.plot(q2rangetoplot, [zfunction(q2,coarray[:nzero,i],0) for q2 in q2rangetoplot],color = "blue",alpha=0.005)
+        #plt.plot(q2rangetoplot, [zfunction(q2,coarray[nzero:nzero+nplus,i],1) for q2 in q2rangetoplot],color = "orange",alpha=0.005)
+        plt.plot(q2rangetoplot,[sorted_ffarray[0,q2,sigmabelow] for q2 in range(len(q2rangetoplot))],color = "blue")
+        plt.plot(q2rangetoplot,[sorted_ffarray[0,q2,sigmaabove] for q2 in range(len(q2rangetoplot))],color = "blue")
+        plt.plot(q2rangetoplot,[sorted_ffarray[1,q2,sigmabelow] for q2 in range(len(q2rangetoplot))],color = "orange")
+        plt.plot(q2rangetoplot,[sorted_ffarray[1,q2,sigmaabove] for q2 in range(len(q2rangetoplot))],color = "orange")
+    plt.show()
 
 
-
-
-coeff_squared = np.zeros((np.shape(coarray)[1]))
-coeff_alt_squared = np.zeros((np.shape(coarray_alt)[1]))
-
-for i in range(np.shape(coarray)[1]):
-    coeff_squared[i] = np.sum([coarray[j,i]**2 for j in range(np.shape(coarray)[0])])
-for i in range(np.shape(coarray_alt)[1]):
-    coeff_alt_squared[i] = np.sum([coarray_alt[j,i]**2 for j in range(np.shape(coarray_alt)[0])])
-plt.rcParams["figure.figsize"] = (10,10)
-plt.hist(coeff_squared,alpha=0.5,label = "traditional z-fit")
-plt.hist(coeff_alt_squared,alpha=0.5,label = "alternative z-fit")
-plt.xlabel("Sum of coefficients squared")
-plt.ylabel("Frequency")
-plt.legend()
-plt.show()
-
-avg_coeffs = np.mean(coarray,axis=1)
-avg_coeffs_alt = np.mean(coarray_alt,axis=1)
-print("coeff = ",avg_coeffs)
-
-print("coeff_alt = ",coeff_alt_squared)
-
-print("f0 z^2 term is ",f2_norm*avg_coeffs_alt[2])
-print("f0 z term is ",f2_norm*avg_coeffs_alt[2]*f2_b + f1_norm*avg_coeffs_alt[1])
-print("f0 constant term is ",f0_norm*avg_coeffs_alt[0] + f1_norm*avg_coeffs_alt[1]*(-(sin_alpha)/alpha) + f2_norm*avg_coeffs_alt[2]*f2_c)
-
-print("f+ z term is ",f1_norm*avg_coeffs_alt[4])
-print("f+ constant term is ",f0_norm*avg_coeffs_alt[3] + f1_norm*avg_coeffs_alt[4]*(-(sin_alpha)/alpha))
+if __name__ == '__main__':
+    q2rangetoplot = np.linspace(0,23,70)
+    ffarray_alt = np.zeros((2,len(q2rangetoplot),np.shape(coarray_alt)[1]))
+    for i,q2 in enumerate(q2rangetoplot):
+        for j in range(np.shape(coarray_alt)[1]):
+            ffarray_alt[0,i,j] = zfunction(q2,coarray_alt[:nzero,j],0,"altfit")
+            ffarray_alt[1,i,j] = zfunction(q2,coarray_alt[nzero:nzero+nplus,j],1,"altfit")
+    sigmabelow_alt = round(np.shape(coarray_alt)[1] * (1-0.6827)/2)
+    sigmaabove_alt = round(np.shape(coarray_alt)[1] * (1+0.6827)/2)
+    sorted_ffarray_alt = np.sort(ffarray_alt,2)
 
 
 
-plt.rcParams["figure.figsize"] = (20,20)
-q2rangetoplot = np.linspace(0,23,70)
-ffstoplot = ffs_from_input_q2(inputq2[0],inputq2[1])
-inputffs = np.append(ffstoplot[0][1],ffstoplot[1][1])
-plt.scatter(ffstoplot[0][0],ffstoplot[0][1],color = "blue")
-plt.scatter(ffstoplot[1][0],ffstoplot[1][1],color = "orange")
-plt.xlabel("$q^2 (GeV^2)$")
-plt.ylabel("Form factor")
-for i in range(np.shape(coarray_alt)[1]):
-    #plt.plot(q2rangetoplot, [zfunction(q2,coarray[:nzero,i],0) for q2 in q2rangetoplot],color = "blue",alpha=0.005)
-    #plt.plot(q2rangetoplot, [zfunction(q2,coarray[nzero:nzero+nplus,i],1) for q2 in q2rangetoplot],color = "orange",alpha=0.005)
-    plt.plot(q2rangetoplot,[sorted_ffarray_alt[0,q2,sigmabelow_alt] for q2 in range(len(q2rangetoplot))],color = "blue",label = "alt fit")
-    plt.plot(q2rangetoplot,[sorted_ffarray_alt[0,q2,sigmaabove_alt] for q2 in range(len(q2rangetoplot))],color = "blue")
-    plt.plot(q2rangetoplot,[sorted_ffarray_alt[1,q2,sigmabelow_alt] for q2 in range(len(q2rangetoplot))],color = "orange",label = "alt fit")
-    plt.plot(q2rangetoplot,[sorted_ffarray_alt[1,q2,sigmaabove_alt] for q2 in range(len(q2rangetoplot))],color = "orange")
-for i in range(np.shape(coarray)[1]):
-    #plt.plot(q2rangetoplot, [zfunction(q2,coarray[:nzero,i],0) for q2 in q2rangetoplot],color = "blue",alpha=0.005)
-    #plt.plot(q2rangetoplot, [zfunction(q2,coarray[nzero:nzero+nplus,i],1) for q2 in q2rangetoplot],color = "orange",alpha=0.005)
-    plt.plot(q2rangetoplot,[sorted_ffarray[0,q2,sigmabelow] for q2 in range(len(q2rangetoplot))],color = "green",label = "z fit")
-    plt.plot(q2rangetoplot,[sorted_ffarray[0,q2,sigmaabove] for q2 in range(len(q2rangetoplot))],color = "green")
-    plt.plot(q2rangetoplot,[sorted_ffarray[1,q2,sigmabelow] for q2 in range(len(q2rangetoplot))],color = "red",label = "z fit")
-    plt.plot(q2rangetoplot,[sorted_ffarray[1,q2,sigmaabove] for q2 in range(len(q2rangetoplot))],color = "red")
-#plt.legend()
-plt.show()
+if __name__ == '__main__':
+    coeff_squared = np.zeros((np.shape(coarray)[1]))
+    coeff_alt_squared = np.zeros((np.shape(coarray_alt)[1]))
+
+    for i in range(np.shape(coarray)[1]):
+        coeff_squared[i] = np.sum([coarray[j,i]**2 for j in range(np.shape(coarray)[0])])
+    for i in range(np.shape(coarray_alt)[1]):
+        coeff_alt_squared[i] = np.sum([coarray_alt[j,i]**2 for j in range(np.shape(coarray_alt)[0])])
+    plt.rcParams["figure.figsize"] = (10,10)
+    plt.hist(coeff_squared,alpha=0.5,label = "traditional z-fit")
+    plt.hist(coeff_alt_squared,alpha=0.5,label = "alternative z-fit")
+    plt.xlabel("Sum of coefficients squared")
+    plt.ylabel("Frequency")
+    plt.legend()
+    plt.show()
+
+    avg_coeffs = np.mean(coarray,axis=1)
+    avg_coeffs_alt = np.mean(coarray_alt,axis=1)
+    print("coeff = ",avg_coeffs)
+
+    print("coeff_alt = ",coeff_alt_squared)
+
+    print("f0 z^2 term is ",f2_norm*avg_coeffs_alt[2])
+    print("f0 z term is ",f2_norm*avg_coeffs_alt[2]*f2_b + f1_norm*avg_coeffs_alt[1])
+    print("f0 constant term is ",f0_norm*avg_coeffs_alt[0] + f1_norm*avg_coeffs_alt[1]*(-(sin_alpha)/alpha) + f2_norm*avg_coeffs_alt[2]*f2_c)
+
+    print("f+ z term is ",f1_norm*avg_coeffs_alt[4])
+    print("f+ constant term is ",f0_norm*avg_coeffs_alt[3] + f1_norm*avg_coeffs_alt[4]*(-(sin_alpha)/alpha))
 
 
 
-plt.rcParams["figure.figsize"] = (20,10)
-q2rangetoplot = np.linspace(0,23,70)
-ffstoplot = ffs_from_input_q2(inputq2[0],inputq2[1])
-inputffs = np.append(ffstoplot[0][1],ffstoplot[1][1])
-plt.xlabel("$q^2 (GeV^2)$")
-#plt.ylabel("Form factor")
-for i in range(np.shape(coarray_alt)[1]):
-    #plt.plot(q2rangetoplot, [zfunction(q2,coarray[:nzero,i],0) for q2 in q2rangetoplot],color = "blue",alpha=0.005)
-    #plt.plot(q2rangetoplot, [zfunction(q2,coarray[nzero:nzero+nplus,i],1) for q2 in q2rangetoplot],color = "orange",alpha=0.005)
-    plt.plot(q2rangetoplot,[abs((sorted_ffarray_alt[0,q2,sigmabelow_alt]-sorted_ffarray_alt[0,q2,sigmaabove_alt])/(sorted_ffarray[0,q2,sigmabelow]-sorted_ffarray[0,q2,sigmaabove])) for q2 in range(len(q2rangetoplot))],color = "blue",label = "alt fit")
-    plt.plot(q2rangetoplot,[abs((sorted_ffarray_alt[1,q2,sigmabelow_alt]-sorted_ffarray_alt[1,q2,sigmaabove_alt])/(sorted_ffarray[1,q2,sigmabelow]-sorted_ffarray[1,q2,sigmaabove])) for q2 in range(len(q2rangetoplot))],color = "red",label = "alt fit")
-plt.show()
+    plt.rcParams["figure.figsize"] = (20,20)
+    q2rangetoplot = np.linspace(0,23,70)
+    ffstoplot = ffs_from_input_q2(inputq2[0],inputq2[1])
+    inputffs = np.append(ffstoplot[0][1],ffstoplot[1][1])
+    plt.scatter(ffstoplot[0][0],ffstoplot[0][1],color = "blue")
+    plt.scatter(ffstoplot[1][0],ffstoplot[1][1],color = "orange")
+    plt.xlabel("$q^2 (GeV^2)$")
+    plt.ylabel("Form factor")
+    for i in range(np.shape(coarray_alt)[1]):
+        #plt.plot(q2rangetoplot, [zfunction(q2,coarray[:nzero,i],0) for q2 in q2rangetoplot],color = "blue",alpha=0.005)
+        #plt.plot(q2rangetoplot, [zfunction(q2,coarray[nzero:nzero+nplus,i],1) for q2 in q2rangetoplot],color = "orange",alpha=0.005)
+        plt.plot(q2rangetoplot,[sorted_ffarray_alt[0,q2,sigmabelow_alt] for q2 in range(len(q2rangetoplot))],color = "blue",label = "alt fit")
+        plt.plot(q2rangetoplot,[sorted_ffarray_alt[0,q2,sigmaabove_alt] for q2 in range(len(q2rangetoplot))],color = "blue")
+        plt.plot(q2rangetoplot,[sorted_ffarray_alt[1,q2,sigmabelow_alt] for q2 in range(len(q2rangetoplot))],color = "orange",label = "alt fit")
+        plt.plot(q2rangetoplot,[sorted_ffarray_alt[1,q2,sigmaabove_alt] for q2 in range(len(q2rangetoplot))],color = "orange")
+    for i in range(np.shape(coarray)[1]):
+        #plt.plot(q2rangetoplot, [zfunction(q2,coarray[:nzero,i],0) for q2 in q2rangetoplot],color = "blue",alpha=0.005)
+        #plt.plot(q2rangetoplot, [zfunction(q2,coarray[nzero:nzero+nplus,i],1) for q2 in q2rangetoplot],color = "orange",alpha=0.005)
+        plt.plot(q2rangetoplot,[sorted_ffarray[0,q2,sigmabelow] for q2 in range(len(q2rangetoplot))],color = "green",label = "z fit")
+        plt.plot(q2rangetoplot,[sorted_ffarray[0,q2,sigmaabove] for q2 in range(len(q2rangetoplot))],color = "green")
+        plt.plot(q2rangetoplot,[sorted_ffarray[1,q2,sigmabelow] for q2 in range(len(q2rangetoplot))],color = "red",label = "z fit")
+        plt.plot(q2rangetoplot,[sorted_ffarray[1,q2,sigmaabove] for q2 in range(len(q2rangetoplot))],color = "red")
+    #plt.legend()
+    plt.show()
+
+
+
+    plt.rcParams["figure.figsize"] = (20,10)
+    q2rangetoplot = np.linspace(0,23,70)
+    ffstoplot = ffs_from_input_q2(inputq2[0],inputq2[1])
+    inputffs = np.append(ffstoplot[0][1],ffstoplot[1][1])
+    plt.xlabel("$q^2 (GeV^2)$")
+    #plt.ylabel("Form factor")
+    for i in range(np.shape(coarray_alt)[1]):
+        #plt.plot(q2rangetoplot, [zfunction(q2,coarray[:nzero,i],0) for q2 in q2rangetoplot],color = "blue",alpha=0.005)
+        #plt.plot(q2rangetoplot, [zfunction(q2,coarray[nzero:nzero+nplus,i],1) for q2 in q2rangetoplot],color = "orange",alpha=0.005)
+        plt.plot(q2rangetoplot,[abs((sorted_ffarray_alt[0,q2,sigmabelow_alt]-sorted_ffarray_alt[0,q2,sigmaabove_alt])/(sorted_ffarray[0,q2,sigmabelow]-sorted_ffarray[0,q2,sigmaabove])) for q2 in range(len(q2rangetoplot))],color = "blue",label = "alt fit")
+        plt.plot(q2rangetoplot,[abs((sorted_ffarray_alt[1,q2,sigmabelow_alt]-sorted_ffarray_alt[1,q2,sigmaabove_alt])/(sorted_ffarray[1,q2,sigmabelow]-sorted_ffarray[1,q2,sigmaabove])) for q2 in range(len(q2rangetoplot))],color = "red",label = "alt fit")
+    plt.show()
