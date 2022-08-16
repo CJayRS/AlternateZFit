@@ -12,7 +12,7 @@ import masses
 from tqdm import tqdm
 from numba import jit
 
-#commit check
+#commit check example
 
 # light mesons
 mpi=(2*0.13957061+0.1349770)/3 # PDG2018
