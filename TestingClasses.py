@@ -11,19 +11,8 @@ import pickle
 warnings.filterwarnings("ignore", message="delta_grad == 0.0. Check if the approximated function is linear.")
 
 if __name__ == '__main__':
-    
-
-
-
-    # zfittest = AltModel(3,2)
-    # opttest = zfittest.fit(data, [0.1,.1,.1,.1,.1])
-    # new_data = data.resample(1)[0]
-    # opttest2 = zfittest.fit(new_data, opttest)
-
-    # wishful = Bootstrapper.bootstrap(data,AltModel,20) #returns array of coefficients (5x2000) and keeps track of inputs
-    
     num_insamples = 20
-    nboot = 20
+    nboot = 500
     inputq2_list = np.random.uniform(17.5, 23.5, (num_insamples, 5))
     inputq2zero = np.sort(inputq2_list[:,:3])
     inputq2plus = np.sort(inputq2_list[:,3:])
@@ -39,11 +28,10 @@ if __name__ == '__main__':
         output_dict_z[listindex] = outval
         output_dict_alt[listindex] = outvalalt
     
-        
-    
-    f = open("z_outdata.pkl", "wb")
+
+    f = open("z_outdata_p9.pkl", "wb")
     pickle.dump(output_dict_z,f)
     f.close()
-    f = open("alt_outdata.pkl", "wb")
+    f = open("alt_outdata_p9.pkl", "wb")
     pickle.dump(output_dict_alt,f)
     f.close()

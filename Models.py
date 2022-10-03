@@ -27,11 +27,17 @@ class Model:
         self.n_zero = n_zero
         self.n_plus = n_plus
     
+    def ffat0(self, coeffs: list):
+        return self.predict([],[0],coeffs)[0]
+
+    
         
         
 class ZFitModel(Model):
     def predict(self, q2_zero: list, q2_plus: list, coefficients: list):
         returnlist = []
+        if self.n_zero is None:
+            self.n_zero = 3
         for t in q2_zero:
             tempsum = 0
             for n, an in enumerate(coefficients[:self.n_zero]):
