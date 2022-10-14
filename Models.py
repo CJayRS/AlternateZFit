@@ -68,3 +68,17 @@ class AltModel(Model):
         return returnlist
     def constraints(self):
         return [{'type': 'eq', 'fun': lambda inlist: self.predict([0], [], inlist)[0]-self.predict([], [0], inlist)[0]}, {'type': 'ineq', 'fun': lambda inlist: 1- sum([inlist[i]**2 for i in range(len(inlist))])}]
+    
+
+    class DispBound:
+        def __init__(self,dataset: Dataset):
+            self.ds = dataset
+        def predict_bounds(self, q2out: list, nboot = 100, intervaltype = "simple"):
+            zero_bounds = []
+            plus_bounds = []
+            for i,q2 in enumerate(q2out):
+                zero_bounds.append((i,i))
+                plus_bounds.append((i,i))
+            return zero_bounds,plus_bounds
+        
+#db.predict_bounds([list of q2 i care about finding the bounds for],nboot) -> return 2 lists of tuples: (f_0 lower val at q0, f_0 upper val at q0)...
