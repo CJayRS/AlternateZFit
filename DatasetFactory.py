@@ -61,6 +61,10 @@ class DatasetFactory:
         fzinputs=(tzin, fzin, chi0plusBsK, zpluspole) # !!! zpluspole just a dummy here
         zero_ffs = fzin#np.array((tzin, ))
         plus_ffs = fpin#np.array((tpin, ))
-        return Dataset(q2_zero, q2_plus, zero_ffs, plus_ffs, bskcov)
+        fpinputs=(tpin,fpin,chi1minusBsK,zpluspole)
+        fzinputs=(tzin,fzin,chi0plusBsK,zpluspole)
+        ds = Dataset(q2_zero, q2_plus, zero_ffs, plus_ffs, bskcov)
+        #ds.set_dbinputs(fzinputs, fpinputs)
+        return ds
     
     

@@ -131,3 +131,22 @@ def alt_polynomial(t, n):
         return f1_norm*(z(t)-(sin_alpha)/alpha)
     if n == 2:
         return f2_norm*(z(t)**2 + z(t)*f2_b + f2_c)
+    
+def Gmatrix(zl):
+    """
+    G matrix for values of z in list zl
+    """
+    npts=len(zl)
+    G=np.zeros((npts,npts))
+    for i,zi in enumerate(zl):
+        G[i,i]=ggzprod(zi,zi)
+        for j in range(i+1,npts):
+            G[i,j]=ggzprod(zi,zl[j])
+            G[j,i]=G[i,j]
+    return G
+
+def ggzprod(zi,zj):
+    """
+    inner product <g_s|g_t>
+    """
+    return 1.0/(1.0-zi*zj)
